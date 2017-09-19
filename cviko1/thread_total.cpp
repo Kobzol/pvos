@@ -14,6 +14,8 @@ void* thread_fn(void* arg)
 int main()
 {
     int counter = 0;
+    bool creating = true;
+
     while (true)
     {
         pthread_t tid;
@@ -21,22 +23,29 @@ int main()
 
         if (ret == 0)
         {
-            if (pthread_detach(tid) != 0)
+            if (!creating)
             {
-                printf("detach failed\n");
-                return 0;
+                creating = true;
+                printf("can create again\n");
             }
+
+            pthread_detach(tid);
             counter++;
         }
         else if (ret == EAGAIN)
         {
-            printf("no more threads can be created, %d was the limit\n", counter);
+            if (creating)
+            {
+                creating = false;
+                printf("hit limit\n");
+            }
+            /*printf("no more threads can be created, %d was the limit\n", counter);
 
             rlimit limit;
             getrlimit(RLIMIT_NPROC, &limit);
             printf("system soft limits: %ld (%ld)\n", limit.rlim_cur, limit.rlim_max);
 
-            return 0;
+            return 0;*/
         }
     }
 }
