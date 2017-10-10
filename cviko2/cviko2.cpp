@@ -20,7 +20,7 @@ void signals()
     /*struct sigaction action{};
     action.sa_sigaction = sigint_handler;
     action.sa_flags = SA_SIGINFO | SA_RESTART;
-    sigemptyset(&action.sa_mask);           // mask - které signály zpracovávat
+    sigemptyset(&action.sa_mask);           // mask - které signály budou navíc zablokované během provádění handleru
     sigaction(SIGALRM, &action, nullptr);
 
     alarm(2);
