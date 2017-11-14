@@ -9,8 +9,9 @@
 #include <fcntl.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <sys/time.h>
 
-#include "util.h"
+#include "../cviko8/util.h"
 
 void get_peer_addr(int fd, char* host, unsigned short& port)
 {
@@ -22,24 +23,28 @@ void get_peer_addr(int fd, char* host, unsigned short& port)
     port = ntohs(address.sin_port);
 }
 
-int chat_send_all(int client, const std::vector<int>& clients)
+std::string clientName(int client)
 {
     char clientHost[256];
     unsigned short clientPort;
     get_peer_addr(client, clientHost, clientPort);
 
+    return std::string(clientHost) + ":" + std::to_string(clientPort);
+}
+
+int chat_send_all(int client, const std::vector<int>& clients)
+{
     char buffer[256];
     ssize_t len = read(client, buffer, sizeof(buffer) - 1);
     if (len <= 0) return -1;
     buffer[len] = '\0';
 
-    printf("%s:%d sends %s\n", clientHost, clientPort, buffer);
+    auto name = clientName(client);
+    printf("%s sends %s", name.c_str(), buffer);
 
     bool close = std::string(buffer).find("close") != std::string::npos;
 
-    std::string msg(clientHost);
-    msg += ":";
-    msg += std::to_string(clientPort);
+    std::string msg = name;
     msg += " says: ";
     msg += buffer;
 
@@ -53,35 +58,85 @@ int chat_send_all(int client, const std::vector<int>& clients)
 
     return 0;
 }
+void oob_send_all(char msg, const std::vector<int>& clients)
+{
+    for (auto& client: clients)
+    {
+        send(client, &msg, 1, MSG_OOB);
+    }
+}
+std::vector<int> pollFdToFd(const std::vector<pollfd>& clients)
+{
+    std::vector<int> fds;
+    for (auto& c: clients)
+    {
+        fds.push_back(c.fd);
+    }
+    return fds;
+}
+
+ssize_t tm_to_ms(timeval* tm)
+{
+    return tm->tv_sec * 1000 + tm->tv_usec / 1000;
+}
+timeval ms_to_tm(ssize_t time)
+{
+    timeval t{};
+    t.tv_sec = time / 1000;
+    time %= 1000;
+    t.tv_usec = time;
+    return t;
+}
+
+#define TIMEOUT_MS 10000
 
 void server_body_select(sockaddr_in addr, int fd)
 {
+    timeval lasttime{};
+    gettimeofday(&lasttime, nullptr);
+
     std::vector<int> clients;
 
     socklen_t len;
     while (true)
     {
         fd_set readset{};
+        fd_set exceptset{};
         FD_ZERO(&readset);
+        FD_ZERO(&exceptset);
         FD_SET(fd, &readset);
 
         int largest = fd;
         for (auto client: clients)
         {
             FD_SET(client, &readset);
+            FD_SET(client, &exceptset);
             largest = std::max(client, largest);
         }
 
-        timeval timeout{};
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
-        int ret = select(largest + 1, &readset, nullptr, nullptr, &timeout);
+        timeval currtime{};
+        gettimeofday(&currtime, nullptr);
+        timeval result{};
+        timersub(&currtime, &lasttime, &result);
+
+        int left = TIMEOUT_MS - tm_to_ms(&result);
+        if (left < 0)
+        {
+            gettimeofday(&lasttime, nullptr);
+            result = ms_to_tm(TIMEOUT_MS);
+            printf("Sending time request to clients\n");
+            oob_send_all('T', clients);
+        }
+
+        int ret = select(largest + 1, &readset, nullptr, &exceptset, &result);
         if (ret < 0)
         {
             printf("Server error\n");
             return;
         }
         else if (ret == 0) continue;
+
+        gettimeofday(&lasttime, nullptr);
 
         if (FD_ISSET(fd, &readset))
         {
@@ -94,13 +149,33 @@ void server_body_select(sockaddr_in addr, int fd)
 
             printf("client connected\n");
 
-            fcntl(client, F_SETFL, fcntl(client, F_GETFL) | O_NONBLOCK);
+            oob_send_all('N', clients);
+
             clients.push_back(client);
         }
 
         std::vector<int> toRemove;
         for (auto client: clients)
         {
+            if (FD_ISSET(client, &exceptset))
+            {
+                char oob;
+                recv(client, &oob, 1, MSG_OOB);
+                if (oob == 'L')
+                {
+                    std::string list = "Clients: ";
+                    for (auto& c: clients)
+                    {
+                        list += clientName(c) + ", ";
+                    }
+                    list += "\n";
+
+                    for (auto& c: clients)
+                    {
+                        write(c, list.c_str(), list.size());
+                    }
+                }
+            }
             if (FD_ISSET(client, &readset))
             {
                 if (chat_send_all(client, clients) < 0)
@@ -118,6 +193,9 @@ void server_body_select(sockaddr_in addr, int fd)
 }
 void server_body_poll(sockaddr_in addr, int fd)
 {
+    timeval lasttime{};
+    gettimeofday(&lasttime, nullptr);
+
     std::vector<pollfd> clients;
     clients.push_back(pollfd{});
     clients.back().fd = fd;
@@ -126,13 +204,29 @@ void server_body_poll(sockaddr_in addr, int fd)
     socklen_t len;
     while (true)
     {
-        int ret = poll(clients.data(), clients.size(), 1000);
+        timeval currtime{};
+        gettimeofday(&currtime, nullptr);
+        timeval result{};
+        timersub(&currtime, &lasttime, &result);
+
+        int left = TIMEOUT_MS - tm_to_ms(&result);
+        if (left < 0)
+        {
+            gettimeofday(&lasttime, nullptr);
+            left = TIMEOUT_MS;
+            printf("Sending time request to clients\n");
+            oob_send_all('T', pollFdToFd(clients));
+        }
+
+        int ret = poll(clients.data(), clients.size(), left);
         if (ret < 0)
         {
             printf("Server error\n");
             return;
         }
         else if (ret == 0) continue;
+
+        gettimeofday(&lasttime, nullptr);
 
         if ((clients[0].revents & POLLIN) != 0)
         {
@@ -145,9 +239,11 @@ void server_body_poll(sockaddr_in addr, int fd)
 
             printf("client connected\n");
 
+            oob_send_all('N', pollFdToFd(clients));
+
             clients.push_back(pollfd{});
             clients.back().fd = client;
-            clients.back().events = POLLIN | POLLHUP;
+            clients.back().events = POLLIN | POLLHUP | POLLPRI;
         }
 
         std::vector<int> fds;
@@ -160,6 +256,25 @@ void server_body_poll(sockaddr_in addr, int fd)
         for (int i = 1; i < clients.size(); i++)
         {
             auto& client = clients[i];
+            if ((client.revents & POLLPRI) != 0)
+            {
+                char oob;
+                recv(client.fd, &oob, 1, MSG_OOB);
+                if (oob == 'L')
+                {
+                    std::string list = "Clients: ";
+                    for (auto& c: clients)
+                    {
+                        list += clientName(c.fd) + ", ";
+                    }
+                    list += "\n";
+
+                    for (auto& c: clients)
+                    {
+                        write(c.fd, list.c_str(), list.size());
+                    }
+                }
+            }
             if ((client.revents & POLLIN) != 0)
             {
                 if (chat_send_all(client.fd, fds) < 0)
