@@ -16,4 +16,4 @@ add_subdirectory("cviko10")
 add_subdirectory("cviko11")
 add_subdirectory("cviko12")
 add_subdirectory("cviko13")
-
+add_subdirectory("zkouska")
